@@ -4,6 +4,10 @@ import re
 import locale
 import os
 import traceback
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from research_agent import ResearchAgent
@@ -66,7 +70,8 @@ def get_first_available_value(data_dict, keys_to_try):
 # --- Sidebar for Inputs and API Keys ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    google_api_key = st.text_input("Enter your Google Gemini API Key", type="password", help="Get your free API key from [Google AI Studio](https://aistudio.google.com/app/apikey).")
+    default_api_key = os.environ.get("GOOGLE_API_KEY", "")
+    google_api_key = st.text_input("Enter your Google Gemini API Key", value=default_api_key, type="password", help="Get your free API key from [Google AI Studio](https://aistudio.google.com/app/apikey).")
     st.markdown("[Get your free Gemini API key here](https://aistudio.google.com/app/apikey)")
     st.markdown("---")
     st.header("▶️ Run New Analysis")
@@ -87,17 +92,22 @@ def _safe_embeddings():
 def initialize_agent(api_key):
     """Initializes the ResearchAgent."""
     os.environ["GOOGLE_API_KEY"] = api_key
-    # Using gemini-2.5-flash per your suggestion
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, api_key=api_key)
+    # Using gemini-3.5-flash-lite by default (compatible with new AQ.* API keys and fast)
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    llm = ChatGoogleGenerativeAI(model=model_name, api_key=api_key)
     embeddings = _safe_embeddings()
 
-    # --- FIX: Make search tool initialization fail-soft ---
+    # --- FIX: Prefer structured DDGS search for real URLs/dates/deep-dive, fallback cleanly ---
     try:
-        from langchain_community.tools import DuckDuckGoSearchRun
-        search_tool = DuckDuckGoSearchRun()
-    except Exception as e:
-        st.warning(f"DuckDuckGo search is unavailable: {e}. Proceeding without web search.")
-        search_tool = None # Set to None if import fails
+        from ddgs import DDGS
+        search_tool = DDGS()
+    except Exception:
+        try:
+            from langchain_community.tools import DuckDuckGoSearchRun
+            search_tool = DuckDuckGoSearchRun()
+        except Exception as e:
+            st.warning(f"DuckDuckGo search is unavailable: {e}. Proceeding without web search.")
+            search_tool = None # Set to None if import fails
 
     return ResearchAgent(llm=llm, embeddings_model=embeddings, search_tool=search_tool)
 
@@ -178,6 +188,9 @@ if st.session_state.current_analysis_index is not None:
         cols[1].metric(label="Market Cap", value=format_large_number(financials.get("Market Cap")))
         cols[2].metric(label="P/E Ratio", value=f"{float(financials.get('Trailing P/E')):.2f}" if financials.get('Trailing P/E') not in [None, "N/A"] else "N/A")
         cols[3].metric(label="EPS", value=f"{float(financials.get('Trailing EPS')):.2f}" if financials.get('Trailing EPS') not in [None, "N/A"] else "N/A")
+        if financials.get("Business Summary") not in [None, "N/A", ""]:
+            with st.expander("🏢 Business Summary"):
+                st.write(financials["Business Summary"])
     else:
         st.warning("Financial data is currently unavailable for this stock.")
         if financial_data_raw and financial_data_raw.startswith("Error:"): st.error(f"Details: {financial_data_raw}")

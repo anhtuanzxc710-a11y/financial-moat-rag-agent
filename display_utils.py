@@ -39,6 +39,20 @@ def display_analysis(title, company_name, result, is_summary=False):
             for i, source_doc in enumerate(sources):
                 source = source_doc.metadata
                 title_text = str(source.get('title', 'Untitled Source'))
+                url = str(source.get('source', '')).strip()
+                published = str(source.get('published', 'N/A')).strip()
+                tier = str(source.get('tier', '')).strip()
 
-                st.markdown(f"**{i+1}. {title_text}**")
-                st.caption(f"Source: [{source.get('source', '#')}]({source.get('source', '#')})")
+                meta_parts = []
+                if tier:
+                    meta_parts.append(tier)
+                if published and published != "N/A":
+                    meta_parts.append(published[:10])
+                meta_suffix = f" _({' • '.join(meta_parts)})_" if meta_parts else ""
+
+                if url.startswith("http"):
+                    st.markdown(f"**{i+1}. [{title_text}]({url})**{meta_suffix}")
+                else:
+                    st.markdown(f"**{i+1}. {title_text}**{meta_suffix}")
+                    if url:
+                        st.caption(f"Source: {url}")

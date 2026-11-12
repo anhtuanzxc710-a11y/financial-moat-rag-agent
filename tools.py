@@ -1,6 +1,29 @@
+import io
+import os
+import shutil
+import tempfile
+import certifi
+
+
+def _ensure_ascii_ca_bundle() -> None:
+    """Point curl_cffi to an ASCII CA bundle path when the venv path has non-ASCII chars."""
+    ca_path = certifi.where()
+    if not ca_path.isascii():
+        ascii_ca = os.path.join(tempfile.gettempdir(), "ai_agent_moat_cacert.pem")
+        if ascii_ca.isascii():
+            if not os.path.exists(ascii_ca):
+                shutil.copyfile(ca_path, ascii_ca)
+            os.environ.setdefault("CURL_CA_BUNDLE", ascii_ca)
+            os.environ.setdefault("SSL_CERT_FILE", ascii_ca)
+
+
+_ensure_ascii_ca_bundle()
+
+import fitz  # PyMuPDF
+import requests
 import yfinance as yf
+from bs4 import BeautifulSoup
 from langchain.tools import tool
-import requests  # Keep for potential future use, but not for yfinance session
 
 @tool
 def get_stock_info(ticker: str) -> str:
@@ -59,6 +82,9 @@ def get_stock_info(ticker: str) -> str:
             data["Trailing EPS"] = info.get('trailingEps')
             data["52 Week High"] = info.get('fiftyTwoWeekHigh')
             data["52 Week Low"] = info.get('fiftyTwoWeekLow')
+            summary = info.get('longBusinessSummary')
+            if summary:
+                data["Business Summary"] = " ".join(str(summary).split())
             if data.get("Market Cap") is None: data["Market Cap"] = info.get('marketCap')
             if data.get("Volume") is None: data["Volume"] = info.get('volume')
         except Exception:
@@ -71,7 +97,7 @@ def get_stock_info(ticker: str) -> str:
         key_order = [
             "Company Name", "Symbol", "Current Price", "Previous Close", "Open",
             "Day Low", "Day High", "Market Cap", "Trailing P/E", "Forward P/E",
-            "Trailing EPS", "Volume", "52 Week High", "52 Week Low"
+            "Trailing EPS", "Volume", "52 Week High", "52 Week Low", "Business Summary"
         ]
         
         report = []
@@ -86,5 +112,36 @@ def get_stock_info(ticker: str) -> str:
 
 @tool
 def scrape_website(url: str) -> str:
-    """A placeholder for a website scraping tool."""
-    return "Scraping functionality is not implemented in this demo."
+    """Scrapes text from HTML websites and extracts text from PDF files."""
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        response = requests.get(url, headers=headers, timeout=12)
+        response.raise_for_status()
+
+        content_type = response.headers.get("content-type", "").lower()
+
+        if "application/pdf" in content_type or url.lower().endswith(".pdf"):
+            with fitz.open(stream=io.BytesIO(response.content), filetype="pdf") as doc:
+                text = "\n".join(page.get_text() for page in doc)
+            text = text.strip()
+            if len(text) < 100:
+                return f"Error: PDF content from {url} is too short."
+            return text[:8000]
+
+        if "text/html" in content_type or "application/xhtml" in content_type:
+            soup = BeautifulSoup(response.content, "html.parser")
+            text = " ".join(p.get_text(" ", strip=True) for p in soup.find_all("p"))
+            if len(text) < 200:
+                return f"Error: HTML content from {url} is too short."
+            return text[:4000]
+
+        return f"Error: Unsupported content type '{content_type}' at {url}"
+    except requests.RequestException as e:
+        return f"Error: Could not access the URL. {e}"
+    except Exception as e:
+        return f"Error: An unexpected error occurred while processing {url}. {e}"

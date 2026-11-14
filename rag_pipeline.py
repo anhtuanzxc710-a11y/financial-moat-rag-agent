@@ -224,6 +224,19 @@ def cited_sources(text, docs):
     return out
 
 
+def split_by_citation(text, docs):
+    """(cited, not_cited) sources, one Document per source, in the order given."""
+    cited_nos = {d.metadata.get("doc_no") for d in cited_sources(text, docs)}
+    seen, cited, rest = set(), [], []
+    for d in docs:
+        no = d.metadata.get("doc_no")
+        if no in seen:
+            continue
+        seen.add(no)
+        (cited if no in cited_nos else rest).append(d)
+    return cited, rest
+
+
 def format_context(docs) -> str:
     """Cites by global source number, so [3] means the same source in every section."""
     return "\n\n".join(

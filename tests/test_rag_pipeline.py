@@ -199,3 +199,24 @@ def test_cited_sources_returns_only_cited_chunks():
 def test_dollar_signs_are_escaped_for_streamlit():
     from display_utils import _clean_markdown
     assert _clean_markdown("Price $356.27, high $360.83") == "Price \\$356.27, high \\$360.83"
+
+
+def test_split_by_citation_puts_cited_sources_first():
+    docs = [Document(page_content="", metadata={"doc_no": n, "chunk_id": f"S{n}-c{i}"}) for n, i in [(7, 0), (13, 0), (8, 0), (7, 1)]]
+    cited, rest = rp.split_by_citation("Spending is softening [8]. Guarantees add risk [7].", docs)
+    assert [d.metadata["doc_no"] for d in cited] == [7, 8] and [d.metadata["doc_no"] for d in rest] == [13]
+
+
+def test_stock_info_retries_when_rate_limited_and_caches(monkeypatch):
+    import tools
+    calls = []
+
+    def fake_once(ticker):
+        calls.append(ticker)
+        return "Error: Too Many Requests. Rate limited." if len(calls) < 3 else "Current Price: 180.5"
+
+    monkeypatch.setattr(tools, "_stock_info_once", fake_once)
+    monkeypatch.setattr(tools.time, "sleep", lambda s: None)
+    tools._STOCK_CACHE.clear()
+    assert tools.get_stock_info.run("NVDA") == "Current Price: 180.5" and len(calls) == 3
+    assert tools.get_stock_info.run("nvda") == "Current Price: 180.5" and len(calls) == 3  # served from cache

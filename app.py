@@ -12,7 +12,6 @@ load_dotenv()
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from research_agent import ResearchAgent
-from tools import get_stock_info
 from display_utils import display_analysis
 from rag_pipeline import cited_sources
 
@@ -137,12 +136,12 @@ def run_full_analysis(company_name, stock_ticker):
         with st.spinner(f"Running analysis for {company_name}..."):
             research_agent = initialize_agent(google_api_key)
             research_agent.clear_cache()  # every run fetches fresh sources
-            financial_data_str = get_stock_info.run(stock_ticker)
+            base_results["market_outlook"] = research_agent.generate_market_outlook(company_name, stock_ticker)
+            # Reuse the agent's single Yahoo call instead of a second request (Yahoo rate-limits repeats).
+            financial_data_str = research_agent._context.get("financial_raw", "Error: no financial data.")
             base_results["financial_data"] = financial_data_str
             if financial_data_str.startswith("Error"):
                 st.warning(f"Could not retrieve complete financial data for {stock_ticker}. Proceeding with web analysis only.")
-
-            base_results["market_outlook"] = research_agent.generate_market_outlook(company_name, stock_ticker)
             base_results["value_analysis"] = research_agent.generate_value_analysis(company_name, stock_ticker)
             base_results["devils_advocate"] = research_agent.generate_devils_advocate_view(company_name, stock_ticker)
             base_results["final_summary"] = research_agent.generate_final_summary(

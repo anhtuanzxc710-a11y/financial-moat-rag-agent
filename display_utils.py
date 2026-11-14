@@ -3,6 +3,8 @@ from streamlit_extras.add_vertical_space import add_vertical_space
 import re
 import unicodedata
 
+from rag_pipeline import split_by_citation
+
 # --- FIX: Added a helper function to sanitize text before rendering ---
 def _clean_markdown(text: str) -> str:
     """Normalizes and cleans markdown text to prevent rendering artifacts."""
@@ -37,31 +39,22 @@ def display_analysis(title, company_name, result, is_summary=False):
 
     # Use an expander for the sources to keep the UI clean
     if sources:
-        with st.expander("View Sources Used in this Section"):
-            shown = set()
-            for source_doc in sources:
-                source = source_doc.metadata
-                doc_no = source.get('doc_no')
-                if doc_no in shown:
-                    continue  # several chunks can come from one source
-                shown.add(doc_no)
-                title_text = str(source.get('title', 'Untitled Source'))
-                url = str(source.get('source', '')).strip()
-                published = str(source.get('published', 'N/A')).strip()
-                tier = str(source.get('tier', '')).strip()
-                chunk_ids = [d.metadata.get('chunk_id') for d in sources if d.metadata.get('doc_no') == doc_no]
+        cited, not_cited = split_by_citation(answer, sources)
+        with st.expander(f"View Sources Used in this Section ({len(cited)} cited, {len(not_cited)} retrieved but not cited)"):
+            for group, note in ((cited, ""), (not_cited, " · retrieved, not cited")):
+                for source_doc in group:
+                    source = source_doc.metadata
+                    doc_no = source.get('doc_no')
+                    title_text = str(source.get('title', 'Untitled Source'))
+                    url = str(source.get('source', '')).strip()
+                    published = str(source.get('published', 'N/A')).strip()
+                    tier = str(source.get('tier', '')).strip()
+                    chunk_ids = [d.metadata.get('chunk_id') for d in sources if d.metadata.get('doc_no') == doc_no]
 
-                meta_parts = []
-                if tier:
-                    meta_parts.append(tier)
-                if published and published != "N/A":
-                    meta_parts.append(published[:10])
-                meta_suffix = f" _({' • '.join(meta_parts)})_" if meta_parts else ""
-
-                if url.startswith("http"):
-                    st.markdown(f"**[{doc_no}] [{title_text}]({url})**{meta_suffix}")
-                else:
-                    st.markdown(f"**[{doc_no}] {title_text}**{meta_suffix}")
-                    if url:
+                    meta_parts = [p for p in (tier, published[:10] if published != "N/A" else "") if p]
+                    meta_suffix = f" _({' • '.join(meta_parts)}{note})_" if meta_parts or note else ""
+                    link = f"[{title_text}]({url})" if url.startswith("http") else title_text
+                    st.markdown(f"**[{doc_no}] {link}**{meta_suffix}")
+                    if url and not url.startswith("http"):
                         st.caption(f"Source: {url}")
-                st.caption("Chunks: " + ", ".join(chunk_ids))
+                    st.caption("Chunks: " + ", ".join(chunk_ids))

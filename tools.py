@@ -18,14 +18,15 @@ def _ensure_ascii_ca_bundle() -> None:
 
 _ensure_ascii_ca_bundle()
 
+import time
+
 import requests
 import yfinance as yf
 from langchain.tools import tool
 
 from rag_pipeline import extract_html_text, extract_pdf_pages
 
-@tool
-def get_stock_info(ticker: str) -> str:
+def _stock_info_once(ticker: str) -> str:
     """
     Fetches key financial information for a given stock ticker using the yfinance library.
     Uses a multi-step, resilient fallback approach and handles different key casings.
@@ -108,6 +109,27 @@ def get_stock_info(ticker: str) -> str:
 
     except Exception as e:
         return f"Error: An unexpected exception occurred while fetching data for ticker '{ticker}'. Details: {e}"
+
+_STOCK_CACHE = {}  # ticker -> (time, report); Yahoo rate-limits repeated calls from one IP
+STOCK_CACHE_SECONDS = 600
+
+
+@tool
+def get_stock_info(ticker: str) -> str:
+    """Key financial data for a ticker from Yahoo Finance, cached 10 minutes and retried when rate-limited."""
+    key = ticker.strip().upper()
+    hit = _STOCK_CACHE.get(key)
+    if hit and time.time() - hit[0] < STOCK_CACHE_SECONDS:
+        return hit[1]
+    for attempt in range(3):
+        report = _stock_info_once(ticker)
+        if not report.startswith("Error") or not any(s in report for s in ("Too Many Requests", "Rate limited")):
+            break
+        time.sleep(2 * 2 ** attempt)  # 2s, 4s, 8s
+    if not report.startswith("Error"):
+        _STOCK_CACHE[key] = (time.time(), report)
+    return report
+
 
 _HEADERS = {
     "User-Agent": (

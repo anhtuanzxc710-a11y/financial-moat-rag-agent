@@ -181,6 +181,7 @@ class ResearchAgent:
                 print(f"An error occurred during Deep Dive search: {e}")
 
         self._index(entity_name, ticker, financial_data, docs)
+        self._context["financial_raw"] = financial_data_result  # with the error text, for the UI
         self.run_log.update({
             "search_items": search_log,
             "dedup_rejected": dedup.rejected,

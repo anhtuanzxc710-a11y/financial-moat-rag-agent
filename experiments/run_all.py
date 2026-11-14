@@ -109,9 +109,24 @@ def _local(path, snap_dir):
     return path if os.path.exists(path) else os.path.join(snap_dir, "raw", re.split(r"[\\/]", path)[-1])
 
 
-def new_docs(snap):
-    return [Document(page_content=d["content"], metadata={k: v for k, v in d.items() if k != "content"})
-            for d in snap["documents"]]
+def new_docs(snap, snap_dir=None):
+    """Snapshot documents; scraped pages are re-extracted from the raw file with the current code."""
+    raw = {int(k): v for k, v in snap.get("raw_files", {}).items() if v}
+    out, redone = [], set()
+    for d in snap["documents"]:
+        meta = {k: v for k, v in d.items() if k not in ("content", "page")}
+        if snap_dir and d["doc_no"] in raw:
+            if d["doc_no"] in redone:
+                continue
+            redone.add(d["doc_no"])
+            data = open(_local(raw[d["doc_no"]], snap_dir), "rb").read()
+            if raw[d["doc_no"]].endswith(".pdf"):
+                out += [Document(page_content=t, metadata={**meta, "page": p}) for p, t in rp.extract_pdf_pages(data)]
+            else:
+                out.append(Document(page_content=rp.extract_html_text(data), metadata=meta))
+        else:
+            out.append(Document(page_content=d["content"], metadata={k: v for k, v in d.items() if k != "content"}))
+    return out
 
 
 def queries(company):
@@ -131,7 +146,7 @@ def measure(snap_path, emb, tok):
     company, ticker = snap["company"], snap["ticker"]
     m = {"ticker": ticker, "company": company, "created_at": snap["created_at"]}
 
-    old_docs, new = legacy_docs(snap, snap_dir), new_docs(snap)
+    old_docs, new = legacy_docs(snap, snap_dir), new_docs(snap, snap_dir)
     old_chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100,
                                                 add_start_index=True).split_documents(old_docs)
     new_chunks = rp.build_chunks(new, company, tok)

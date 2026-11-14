@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import datetime
 import re
 import locale
@@ -193,6 +194,20 @@ if pending_analysis_index is not None:
     else:
         st.rerun()
 
+def _scroll_to_top():
+    """History sits at the bottom of the page; jump back up to the analysis that was opened."""
+    js = ("<script>const d = window.parent.document;"
+          " for (const el of [d.querySelector('[data-testid=\"stMain\"]'), d.querySelector('section.main'), d.scrollingElement])"
+          " { if (el) el.scrollTo({top: 0, behavior: 'smooth'}); }</script>")
+    if hasattr(st, "iframe"):  # Streamlit >= 1.5x; components.html is deprecated there
+        st.iframe(js, height=1)
+    else:
+        components.html(js, height=0)
+
+
+if st.session_state.pop("scroll_to_top", False):
+    _scroll_to_top()
+
 if st.session_state.current_analysis_index is not None:
     res = st.session_state.analysis_history[st.session_state.current_analysis_index]
     if res.get("status") == "pending": st.info("⏳ Analysis is running..."); st.stop()
@@ -254,7 +269,12 @@ else:
                 if feedback == "upvoted": c2.success("👍 Liked")
                 elif feedback == "downvoted": c2.warning("👎 Disliked")
             if status in ["complete", "error"]:
-                if c3.button("👁️ View", key=f"view_{i}", use_container_width=True): st.session_state.current_analysis_index = i; st.rerun()
+                viewing = i == st.session_state.current_analysis_index
+                # The open analysis is rendered above; label it instead of offering a no-op button.
+                if c3.button("✅ Viewing" if viewing else "👁️ View", key=f"view_{i}", use_container_width=True, disabled=viewing):
+                    st.session_state.current_analysis_index = i
+                    st.session_state.scroll_to_top = True
+                    st.rerun()
             if c3.button("🗑️ Delete", key=f"del_{i}", use_container_width=True, type="secondary"):
                 if st.session_state.current_analysis_index == i: st.session_state.current_analysis_index = None
                 st.session_state.analysis_history.pop(i); st.rerun()

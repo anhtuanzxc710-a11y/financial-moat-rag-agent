@@ -39,32 +39,36 @@ class ResearchAgent:
         self._context = None
         self.run_log = {}
 
+    def _ddgs(self, kind, tier, query, max_results):
+        """One DDGS call (text or news) normalised to title/url/snippet/published; [] on failure."""
+        try:
+            raw = getattr(self.search_tool, kind)(query, max_results=max_results) or []
+        except Exception as e:
+            print(f"{kind} search failed for '{tier}': {e}")
+            return []
+        return [{
+            "title": r.get("title") or f"{tier} Source",
+            "url": r.get("url" if kind == "news" else "href") or "",
+            "snippet": r.get("body") or "",
+            "published": r.get("date") or "N/A",
+            "via": kind,
+        } for r in raw]
+
     def _search_structured(self, tier, query, max_results=3, use_news=False):
-        """Executes search and returns normalized result dicts with title, url, snippet, published."""
+        """Executes search and returns normalized result dicts with title, url, snippet, published.
+
+        Web (text) search can return nothing when engines block automated queries, so each
+        tier falls back to the other search type instead of silently dropping the tier.
+        """
         if hasattr(self.search_tool, "text") and hasattr(self.search_tool, "news"):
-            items = []
-            if use_news:
-                try:
-                    raw = self.search_tool.news(query, max_results=max_results)
-                    for r in raw or []:
-                        items.append({
-                            "title": r.get("title") or f"{tier} Source",
-                            "url": r.get("url") or "",
-                            "snippet": r.get("body") or "",
-                            "published": r.get("date") or "N/A",
-                        })
-                except Exception as e:
-                    print(f"News search fallback for '{tier}': {e}")
-            if not items:
-                raw = self.search_tool.text(query, max_results=max_results)
-                for r in raw or []:
-                    items.append({
-                        "title": r.get("title") or f"{tier} Source",
-                        "url": r.get("href") or "",
-                        "snippet": r.get("body") or "",
-                        "published": "N/A",
-                    })
-            return items
+            order = ["news", "text"] if use_news else ["text", "news"]
+            for kind in order:
+                items = self._ddgs(kind, tier, query, max_results)
+                if items:
+                    if kind != order[0]:
+                        print(f"'{tier}': {order[0]} search empty, used {kind} search instead.")
+                    return items
+            return []
 
         text_result = self.search_tool.run(query)
         if text_result and "No good search result found" not in text_result:

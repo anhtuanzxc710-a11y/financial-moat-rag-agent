@@ -146,3 +146,12 @@ def test_format_context_uses_global_numbers():
     d = Document(page_content="x", metadata={"doc_no": 7, "chunk_id": "S7-c1", "title": "T", "body": "body", "page": 2})
     text = rp.format_context([d])
     assert text.startswith("[7] (chunk S7-c1)") and "Page: 2" in text and "Content: body" in text
+
+
+def test_text_search_falls_back_to_news():
+    class Blocked(FakeSearch):
+        def text(self, query, max_results=4):
+            raise RuntimeError("No results found.")
+    agent = research_agent.ResearchAgent(None, DeterministicFakeEmbedding(size=8), Blocked())
+    items = agent._search_structured("Critical", "Apple risks", max_results=4)
+    assert items and all(i["via"] == "news" for i in items)

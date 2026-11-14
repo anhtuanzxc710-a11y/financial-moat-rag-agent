@@ -32,6 +32,7 @@ class ResearchAgent:
         self.search_tool = search_tool
         self.runs_dir = runs_dir
         self.raw_dir = None  # set to a folder to keep downloaded HTML/PDF for audits
+        self.reference_time = None  # "now" for recent-news slots; a replayed snapshot uses its own date
         self.clear_cache()
 
     def clear_cache(self):
@@ -225,6 +226,7 @@ class ResearchAgent:
             for d in snap["documents"]
         ]
         self._index(snap["company"], snap["ticker"], snap["financial_data"], docs)
+        self.reference_time = datetime.datetime.fromisoformat(snap["created_at"])
         return snap
 
     def save_run(self, outputs=None):
@@ -248,7 +250,8 @@ class ResearchAgent:
             return []
         # Rank every chunk (a few hundred at most) so the per-source cap never runs dry.
         scored = ctx["vector_store"].similarity_search_with_score(query, k=len(ctx["chunks"]))
-        return rp.select_balanced(scored)
+        now = self.reference_time or datetime.datetime.now()
+        return rp.select_balanced(rp.prioritize_recent(scored, now))
 
     def _run_analysis(self, entity_name, ticker, system_prompt, query_input):
         ctx = self._get_context(entity_name, ticker)
@@ -268,12 +271,13 @@ class ResearchAgent:
             "Using the retrieved context below, generate a report with these sections:\n"
             "1. **Professional Market Sentiment:** Based on official news/reports.\n"
             "2. **Retail Investor Sentiment:** Based on forum snippets.\n"
-            "3. **Valuation Analysis:** Is it expensive or cheap? Reference 'Trailing P/E' and 'Trailing EPS'.\n"
+            "3. **Valuation Analysis:** Is it expensive or cheap? Reference 'Trailing P/E', 'Trailing EPS', '5-Day Change' and '1-Month Change'.\n"
+            "Lead with any major event from the last 7 days (leadership change, lawsuit, sharp price move) if the context reports one.\n"
             "**Cite sources with the bracketed source numbers shown in the context, e.g. [3], at the end of sentences.**\n\nContext:\n{context_formatted}\n\n"
             "This is an objective summary, not financial advice. "
             "Do not insert line breaks inside words or numbers. Keep paragraphs wrapped normally."
         )
-        return self._run_analysis(entity_name, ticker, system_prompt, f"Market outlook for {entity_name}")
+        return self._run_analysis(entity_name, ticker, system_prompt, f"{entity_name} stock news, analyst ratings, price targets and investor sentiment")
 
     def generate_value_analysis(self, entity_name, ticker):
         print("\nGenerating Value Investor Analysis...")
@@ -286,17 +290,18 @@ class ResearchAgent:
             "**Cite sources with the bracketed source numbers shown in the context, e.g. [3], at the end of sentences.**\n\nContext:\n{context_formatted}\n\n"
             "Do not insert line breaks inside words or numbers. Keep paragraphs wrapped normally."
         )
-        return self._run_analysis(entity_name, ticker, system_prompt, f"Value analysis for {entity_name}")
+        return self._run_analysis(entity_name, ticker, system_prompt, f"{entity_name} valuation, earnings, margins and competitive moat")
 
     def generate_devils_advocate_view(self, entity_name, ticker):
         print("\nGenerating Devil's Advocate View...")
         system_prompt = (
             "You are a skeptical 'Devil's Advocate' analyst. Your purpose is to challenge the bullish thesis. Key financial data:\n{financial_data}\n\n" 
             "Using the retrieved context below, identify the single strongest counter-argument or hidden risk in a concise paragraph.\n"
+            "A major event from the last 7 days (leadership change, lawsuit, sharp price fall) outranks older, slower-moving risks.\n"
             "**Cite the source of your information with the bracketed source numbers shown in the context, e.g. [3], at the end of the sentence.**\n\nContext:\n{context_formatted}\n\n"
             "Do not insert line breaks inside words or numbers. Keep paragraphs wrapped normally."
         )
-        return self._run_analysis(entity_name, ticker, system_prompt, f"Strongest bearish case against {entity_name}?")
+        return self._run_analysis(entity_name, ticker, system_prompt, f"{entity_name} risks: lawsuit, leadership change, scandal, regulation, falling stock price")
 
     def generate_final_summary(self, entity_name, market_outlook, value_analysis, devils_advocate):
         print("\nGenerating Final Consensus Summary...")

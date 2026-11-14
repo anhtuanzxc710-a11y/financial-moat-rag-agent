@@ -220,3 +220,32 @@ def test_stock_info_retries_when_rate_limited_and_caches(monkeypatch):
     tools._STOCK_CACHE.clear()
     assert tools.get_stock_info.run("NVDA") == "Current Price: 180.5" and len(calls) == 3
     assert tools.get_stock_info.run("nvda") == "Current Price: 180.5" and len(calls) == 3  # served from cache
+
+
+def test_recent_news_gets_reserved_slots():
+    from datetime import datetime
+    now = datetime(2026, 11, 14, 12, 0)
+    def doc(no, tier, published):
+        return Document(page_content="", metadata={"doc_no": no, "chunk_id": f"S{no}-c0", "tier": tier, "published": published})
+    ranked = [(doc(14, "Deep Dive", "2026-10-15"), .1), (doc(7, "Critical News & Sentiment", "2026-10-18T00:00:00+00:00"), .2),
+              (doc(16, "Deep Dive", "2026-08-26"), .3), (doc(8, "Critical News & Sentiment", "N/A"), .4),
+              (doc(2, "Official News & Analysis", "2026-11-12T21:00:00+00:00"), .9), (doc(5, "Critical News & Sentiment", "2026-11-13T09:00:00Z"), .95)]
+    assert rp.is_recent_news(ranked[4][0].metadata, now) and not rp.is_recent_news(ranked[1][0].metadata, now)
+    top = rp.select_balanced(rp.prioritize_recent(ranked, now), k=4)
+    assert [d.metadata["doc_no"] for d in top] == [2, 5, 14, 7]  # the CEO-exit style news is no longer ranked out
+
+
+def test_stock_info_reports_recent_change(monkeypatch):
+    import pandas as pd
+    import tools
+
+    class FakeTicker:
+        fast_info = {"last_price": 90.0}
+        def history(self, period):
+            return pd.DataFrame({"Close": [100.0] * 15 + [100.0, 98.0, 95.0, 93.0, 91.0, 90.0]})
+        def get_info(self):
+            return {}
+
+    monkeypatch.setattr(tools.yf, "Ticker", lambda t: FakeTicker())
+    report = tools._stock_info_once("NVDA")
+    assert "5-Day Change: -10.0%" in report and "1-Month Change: -10.0%" in report

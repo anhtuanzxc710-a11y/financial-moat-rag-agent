@@ -90,6 +90,16 @@ def _stock_info_once(ticker: str) -> str:
         except Exception:
             pass # get_info() is non-critical
 
+        # Recent momentum: the LLM cannot see a sell-off from price and 52-week range alone.
+        try:
+            close = stock.history(period="1mo")["Close"].dropna()
+            if len(close) >= 6:
+                data["5-Day Change"] = f"{(close.iloc[-1] / close.iloc[-6] - 1) * 100:+.1f}%"
+            if len(close) >= 2:
+                data["1-Month Change"] = f"{(close.iloc[-1] / close.iloc[0] - 1) * 100:+.1f}%"
+        except Exception:
+            pass  # momentum is optional
+
         # --- FIX: Remove hard error gate. Proceed with N/A. ---
         if data.get("Current Price") is None:
             data["Current Price"] = "N/A" # Set to N/A instead of returning an error string
@@ -97,7 +107,7 @@ def _stock_info_once(ticker: str) -> str:
         key_order = [
             "Company Name", "Symbol", "Current Price", "Previous Close", "Open",
             "Day Low", "Day High", "Market Cap", "Trailing P/E", "Forward P/E",
-            "Trailing EPS", "Volume", "52 Week High", "52 Week Low", "Business Summary"
+            "Trailing EPS", "Volume", "52 Week High", "52 Week Low", "5-Day Change", "1-Month Change", "Business Summary"
         ]
         
         report = []

@@ -6,6 +6,7 @@ replayed offline from a saved run snapshot.
 import hashlib
 import io
 import re
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
@@ -235,6 +236,32 @@ def split_by_citation(text, docs):
         seen.add(no)
         (cited if no in cited_nos else rest).append(d)
     return cited, rest
+
+
+# Breaking news is short and worded unlike an analysis query, so pure similarity ranks it low.
+# Reserve slots for the most relevant recent news so events like a CEO exit always reach the LLM.
+RECENT_DAYS = 7
+RECENT_SLOTS = 2
+NEWS_TIERS = ("Official News & Analysis", "Critical News & Sentiment")
+
+
+def is_recent_news(meta, now, days=RECENT_DAYS) -> bool:
+    try:
+        published = datetime.fromisoformat(str(meta.get("published", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return False  # "N/A" or unknown format
+    return meta.get("tier") in NEWS_TIERS and published.date() >= (now - timedelta(days=days)).date()
+
+
+def prioritize_recent(scored_docs, now, slots=RECENT_SLOTS):
+    """Moves the best `slots` recent news sources (one chunk each) to the front of the ranking."""
+    front, seen = [], set()
+    for i, (doc, _) in enumerate(scored_docs):
+        no = doc.metadata.get("doc_no")
+        if len(front) < slots and no not in seen and is_recent_news(doc.metadata, now):
+            front.append(i)
+            seen.add(no)
+    return [scored_docs[i] for i in front] + [x for i, x in enumerate(scored_docs) if i not in front]
 
 
 def format_context(docs) -> str:

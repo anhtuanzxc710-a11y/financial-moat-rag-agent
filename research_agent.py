@@ -313,7 +313,8 @@ class ResearchAgent:
             "   • Choose **Bearish** if EITHER (A) major red flags/negative catalysts are present OR (B) valuation is extreme and unsupported.\n"
             "   • Choose **Neutral with Caution** ONLY if evidence is genuinely mixed or insufficient.\n"
             "   • If evidence is mixed but slightly positive, prefer **Bullish**; if mixed but slightly negative, prefer **Bearish**.\n"
-            "2. **Summary Justification:** 3–5 sentences, weighing the three views. No line breaks inside words.\n\n"
+            "2. **Summary Justification:** 3–5 sentences, weighing the three views. No line breaks inside words.\n"
+            "Keep the analysts' bracketed source numbers (e.g. [3]) after each point you take from them.\n\n"
             "--- ANALYSIS CONTEXT ---\n{analysis_context}"
         )
         prompt = ChatPromptTemplate.from_template(system_prompt)

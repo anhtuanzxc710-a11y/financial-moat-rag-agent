@@ -16,6 +16,8 @@ def _clean_markdown(text: str) -> str:
     s = re.sub(r'\n{3,}', '\n\n', s)
     # Collapse excessive spaces or tabs into a single space
     s = re.sub(r'[ \t]{2,}', ' ', s)
+    # Streamlit reads $...$ as LaTeX, which garbles prices such as "$356.27 ... $360.83"
+    s = re.sub(r'(?<!\\)\$', r'\\$', s)
     return s.strip()
 
 def display_analysis(title, company_name, result, is_summary=False):

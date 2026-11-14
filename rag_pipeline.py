@@ -209,6 +209,21 @@ def select_balanced(scored_docs, k=TOP_K, max_per_doc=MAX_CHUNKS_PER_DOC):
     return picked + overflow[: k - len(picked)]
 
 
+_CITE_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def cited_sources(text, docs):
+    """The chunks whose global source number [n] is cited in `text`, one entry per chunk."""
+    cited = {int(n) for group in _CITE_RE.findall(text or "") for n in group.split(",")}
+    seen, out = set(), []
+    for d in docs:
+        cid = d.metadata.get("chunk_id")
+        if d.metadata.get("doc_no") in cited and cid not in seen:
+            seen.add(cid)
+            out.append(d)
+    return out
+
+
 def format_context(docs) -> str:
     """Cites by global source number, so [3] means the same source in every section."""
     return "\n\n".join(

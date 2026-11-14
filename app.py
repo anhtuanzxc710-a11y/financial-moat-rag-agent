@@ -13,6 +13,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from research_agent import ResearchAgent
 from tools import get_stock_info
 from display_utils import display_analysis
+from rag_pipeline import cited_sources
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -149,6 +150,11 @@ def run_full_analysis(company_name, stock_ticker):
                 base_results["value_analysis"].get('answer', ''),
                 base_results["devils_advocate"].get('answer', '')
             )
+            # The Lead Analyst cites the analysts' [n]; show exactly those sources under the summary.
+            base_results["final_sources"] = cited_sources(base_results["final_summary"], [
+                d for k in ("market_outlook", "value_analysis", "devils_advocate")
+                for d in base_results[k].get("sources", [])
+            ])
             base_results["status"] = "complete"
             base_results["run_file"] = research_agent.save_run({
                 k: (v.get("answer") if isinstance(v, dict) else v)
@@ -209,7 +215,8 @@ if st.session_state.current_analysis_index is not None:
         if financial_data_raw and financial_data_raw.startswith("Error:"): st.error(f"Details: {financial_data_raw}")
 
     tabs = st.tabs(["Final Summary", "Market Outlook", "Value Analysis", "Devil's Advocate", "Feedback"])
-    with tabs[0]: display_analysis("Final Consensus Summary", res['company_name'], res.get("final_summary", ""), is_summary=True)
+    with tabs[0]: display_analysis("Final Consensus Summary", res['company_name'],
+                                   {"answer": res.get("final_summary", ""), "sources": res.get("final_sources", [])})
     with tabs[1]: display_analysis("AI-Generated Market Investor Outlook", res['company_name'], res.get("market_outlook", {}))
     with tabs[2]: display_analysis("AI-Generated Value Investor Analysis", res['company_name'], res.get("value_analysis", {}))
     with tabs[3]: display_analysis("AI-Generated Devil's Advocate View", res['company_name'], res.get("devils_advocate", {}))

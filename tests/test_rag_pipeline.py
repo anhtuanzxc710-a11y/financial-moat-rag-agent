@@ -188,3 +188,14 @@ def test_colab_agent_uses_shared_pipeline(monkeypatch):
     items = agent._search_structured("Official", "Apple news", use_news=True)
     assert len(items) == 1 and items[0]["url"] == "https://a.com/x"
     assert isinstance(agent, research_agent.ResearchAgent)
+
+
+def test_cited_sources_returns_only_cited_chunks():
+    docs = [Document(page_content="", metadata={"doc_no": n, "chunk_id": f"S{n}-c{i}"}) for n, i in [(3, 0), (3, 1), (7, 0), (9, 0), (3, 0)]]
+    picked = rp.cited_sources("Valuation looks stretched [3, 9]. Margins hold [9].", docs)
+    assert [d.metadata["chunk_id"] for d in picked] == ["S3-c0", "S3-c1", "S9-c0"]
+
+
+def test_dollar_signs_are_escaped_for_streamlit():
+    from display_utils import _clean_markdown
+    assert _clean_markdown("Price $356.27, high $360.83") == "Price \\$356.27, high \\$360.83"

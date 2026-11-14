@@ -36,12 +36,18 @@ def display_analysis(title, company_name, result, is_summary=False):
     # Use an expander for the sources to keep the UI clean
     if sources:
         with st.expander("View Sources Used in this Section"):
-            for i, source_doc in enumerate(sources):
+            shown = set()
+            for source_doc in sources:
                 source = source_doc.metadata
+                doc_no = source.get('doc_no')
+                if doc_no in shown:
+                    continue  # several chunks can come from one source
+                shown.add(doc_no)
                 title_text = str(source.get('title', 'Untitled Source'))
                 url = str(source.get('source', '')).strip()
                 published = str(source.get('published', 'N/A')).strip()
                 tier = str(source.get('tier', '')).strip()
+                chunk_ids = [d.metadata.get('chunk_id') for d in sources if d.metadata.get('doc_no') == doc_no]
 
                 meta_parts = []
                 if tier:
@@ -51,8 +57,9 @@ def display_analysis(title, company_name, result, is_summary=False):
                 meta_suffix = f" _({' • '.join(meta_parts)})_" if meta_parts else ""
 
                 if url.startswith("http"):
-                    st.markdown(f"**{i+1}. [{title_text}]({url})**{meta_suffix}")
+                    st.markdown(f"**[{doc_no}] [{title_text}]({url})**{meta_suffix}")
                 else:
-                    st.markdown(f"**{i+1}. {title_text}**{meta_suffix}")
+                    st.markdown(f"**[{doc_no}] {title_text}**{meta_suffix}")
                     if url:
                         st.caption(f"Source: {url}")
+                st.caption("Chunks: " + ", ".join(chunk_ids))

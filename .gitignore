@@ -28,3 +28,7 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# --- Run logs and experiment data (may contain scraped text) ---
+runs/
+experiments/data/

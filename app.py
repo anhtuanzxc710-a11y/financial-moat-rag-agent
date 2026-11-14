@@ -84,8 +84,13 @@ def _safe_embeddings():
     try:
         return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     except Exception as e:
-        st.warning(f"Could not load primary embedding model. Error: {e}. Falling back to a smaller model.")
-        return HuggingFaceEmbeddings(model_name="intfloat/e5-small-v2")
+        st.warning(f"Could not load primary embedding model. Error: {e}. Falling back to intfloat/e5-small-v2 (33M parameters).")
+        # e5 was trained with these prefixes; without them retrieval quality drops.
+        return HuggingFaceEmbeddings(
+            model_name="intfloat/e5-small-v2",
+            encode_kwargs={"prompt": "passage: ", "normalize_embeddings": True},
+            query_encode_kwargs={"prompt": "query: ", "normalize_embeddings": True},
+        )
 
 # --- Agent Initialization (Cached) ---
 @st.cache_resource
@@ -109,7 +114,9 @@ def initialize_agent(api_key):
             st.warning(f"DuckDuckGo search is unavailable: {e}. Proceeding without web search.")
             search_tool = None # Set to None if import fails
 
-    return ResearchAgent(llm=llm, embeddings_model=embeddings, search_tool=search_tool)
+    # The embedding model's own tokenizer lets the splitter count real tokens (MiniLM limit: 256).
+    tokenizer = getattr(getattr(embeddings, "_client", None), "tokenizer", None)
+    return ResearchAgent(llm=llm, embeddings_model=embeddings, search_tool=search_tool, tokenizer=tokenizer)
 
 
 # --- Main Application Logic ---
@@ -127,6 +134,7 @@ def run_full_analysis(company_name, stock_ticker):
     try:
         with st.spinner(f"Running analysis for {company_name}..."):
             research_agent = initialize_agent(google_api_key)
+            research_agent.clear_cache()  # every run fetches fresh sources
             financial_data_str = get_stock_info.run(stock_ticker)
             base_results["financial_data"] = financial_data_str
             if financial_data_str.startswith("Error"):
@@ -142,6 +150,11 @@ def run_full_analysis(company_name, stock_ticker):
                 base_results["devils_advocate"].get('answer', '')
             )
             base_results["status"] = "complete"
+            base_results["run_file"] = research_agent.save_run({
+                k: (v.get("answer") if isinstance(v, dict) else v)
+                for k, v in base_results.items()
+                if k in ("market_outlook", "value_analysis", "devils_advocate", "final_summary")
+            })
         return base_results
     except Exception as e:
         st.error(f"A critical error occurred during the analysis: {e}")

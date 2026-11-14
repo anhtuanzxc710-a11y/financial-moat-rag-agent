@@ -1,4 +1,3 @@
-import io
 import os
 import shutil
 import tempfile
@@ -19,11 +18,11 @@ def _ensure_ascii_ca_bundle() -> None:
 
 _ensure_ascii_ca_bundle()
 
-import fitz  # PyMuPDF
 import requests
 import yfinance as yf
-from bs4 import BeautifulSoup
 from langchain.tools import tool
+
+from rag_pipeline import extract_html_text, extract_pdf_pages
 
 @tool
 def get_stock_info(ticker: str) -> str:
@@ -110,37 +109,45 @@ def get_stock_info(ticker: str) -> str:
     except Exception as e:
         return f"Error: An unexpected exception occurred while fetching data for ticker '{ticker}'. Details: {e}"
 
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+
+def fetch_document(url: str) -> dict:
+    """Downloads a page or PDF and extracts text without cutting it short.
+
+    Returns {"kind": "pdf"|"html", "pages": [(page_no or None, text)], "raw": bytes}.
+    HTML keeps headings, lists and tables; PDF keeps one entry per page.
+    Raises ValueError when nothing usable was extracted.
+    """
+    response = requests.get(url, headers=_HEADERS, timeout=12)
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "").lower()
+
+    if "application/pdf" in content_type or url.lower().endswith(".pdf"):
+        pages = extract_pdf_pages(response.content)
+        if sum(len(t) for _, t in pages) < 100:
+            raise ValueError(f"PDF content from {url} is too short.")
+        return {"kind": "pdf", "pages": pages, "raw": response.content}
+
+    if "text/html" in content_type or "application/xhtml" in content_type:
+        text = extract_html_text(response.content)
+        if len(text) < 200:
+            raise ValueError(f"HTML content from {url} is too short.")
+        return {"kind": "html", "pages": [(None, text)], "raw": response.content}
+
+    raise ValueError(f"Unsupported content type '{content_type}' at {url}")
+
+
 @tool
 def scrape_website(url: str) -> str:
     """Scrapes text from HTML websites and extracts text from PDF files."""
     try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
-        response = requests.get(url, headers=headers, timeout=12)
-        response.raise_for_status()
-
-        content_type = response.headers.get("content-type", "").lower()
-
-        if "application/pdf" in content_type or url.lower().endswith(".pdf"):
-            with fitz.open(stream=io.BytesIO(response.content), filetype="pdf") as doc:
-                text = "\n".join(page.get_text() for page in doc)
-            text = text.strip()
-            if len(text) < 100:
-                return f"Error: PDF content from {url} is too short."
-            return text[:8000]
-
-        if "text/html" in content_type or "application/xhtml" in content_type:
-            soup = BeautifulSoup(response.content, "html.parser")
-            text = " ".join(p.get_text(" ", strip=True) for p in soup.find_all("p"))
-            if len(text) < 200:
-                return f"Error: HTML content from {url} is too short."
-            return text[:4000]
-
-        return f"Error: Unsupported content type '{content_type}' at {url}"
+        return "\n\n".join(t for _, t in fetch_document(url)["pages"])
     except requests.RequestException as e:
         return f"Error: Could not access the URL. {e}"
     except Exception as e:

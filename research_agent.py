@@ -1,18 +1,13 @@
-try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-except ImportError:
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_core.documents import Document
-import re
+import datetime
+import json
 import os
-from operator import itemgetter
 
 # Import the tools this agent will use
-from tools import get_stock_info, scrape_website
+from tools import get_stock_info, fetch_document
+import rag_pipeline as rp
 
 
 def _extract_text(content) -> str:
@@ -30,17 +25,19 @@ def _extract_text(content) -> str:
     return str(content)
 
 class ResearchAgent:
-    def __init__(self, llm, embeddings_model, search_tool):
+    def __init__(self, llm, embeddings_model, search_tool, tokenizer=None, runs_dir="runs"):
         self.llm = llm
         self.embeddings_model = embeddings_model
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        self.tokenizer = tokenizer  # embedding tokenizer -> token-based chunking
         self.search_tool = search_tool
-        self.cache = {}
+        self.runs_dir = runs_dir
+        self.raw_dir = None  # set to a folder to keep downloaded HTML/PDF for audits
+        self.clear_cache()
 
     def clear_cache(self):
-        """Clears the agent's cache."""
-        print("Cache cleared.")
-        self.cache = {}
+        """Forgets the current context so the next analysis fetches fresh data."""
+        self._context = None
+        self.run_log = {}
 
     def _search_structured(self, tier, query, max_results=3, use_news=False):
         """Executes search and returns normalized result dicts with title, url, snippet, published."""
@@ -79,12 +76,36 @@ class ResearchAgent:
             }]
         return []
 
+    # --- Context: collect, de-duplicate, number, chunk, index (once per analysis) ---
+    def _add_source(self, docs, pages, item, tier):
+        """Adds one source (all its pages) under a new global source number."""
+        doc_no = len({d.metadata["doc_no"] for d in docs}) + 1
+        for page, text in pages:
+            meta = {
+                "doc_no": doc_no,
+                "source": item["url"] or "DuckDuckGo Search",
+                "title": item["title"],
+                "published": item["published"],
+                "tier": tier,
+            }
+            if page:
+                meta["page"] = page
+            docs.append(Document(page_content=text, metadata=meta))
+        return doc_no
+
+    def _save_raw(self, doc_no, fetched):
+        if not self.raw_dir:
+            return None
+        os.makedirs(self.raw_dir, exist_ok=True)
+        path = os.path.join(self.raw_dir, f"S{doc_no}.{fetched['kind']}")
+        with open(path, "wb") as f:
+            f.write(fetched["raw"])
+        return path
+
     def _get_context(self, entity_name, ticker):
-        """Gathers financial metrics and multi-tiered web/PDF documents for RAG."""
-        context_cache_key = f"context_{entity_name}_{ticker}"
-        if context_cache_key in self.cache:
-            print("Returning cached context.")
-            return self.cache[context_cache_key]
+        """Gathers financial metrics and multi-tiered web/PDF documents, then indexes them."""
+        if self._context and self._context["key"] == (entity_name, ticker):
+            return self._context
 
         financial_data_result = get_stock_info.run(ticker)
         if financial_data_result.startswith("Error"):
@@ -93,18 +114,16 @@ class ResearchAgent:
             financial_data = financial_data_result
             print("Successfully collected financial data.")
 
-        source_documents = []
-        if not self.search_tool:
-            print("--- Web search tool not available, skipping web search. ---")
-            self.cache[context_cache_key] = (financial_data, source_documents)
-            return financial_data, source_documents
-
-        seen_urls = set()
+        docs, search_log, raw_files = [], [], {}
+        dedup = rp.Deduplicator()
         tiers = [
             ("Official News & Analysis", f"{entity_name} {ticker} stock news", 4, True),
             ("Critical News & Sentiment", f"{entity_name} {ticker} stock risks lawsuits concerns short interest", 4, False),
             ("Retail Investor Sentiment", f"{entity_name} {ticker} reddit stocks investor sentiment", 4, False),
         ]
+        if not self.search_tool:
+            print("--- Web search tool not available, skipping web search. ---")
+            tiers = []
 
         for tier, query, max_res, use_news in tiers:
             print(f"--- Searching for: {tier} ---")
@@ -112,116 +131,130 @@ class ResearchAgent:
                 results = self._search_structured(tier, query, max_results=max_res, use_news=use_news)
                 added = 0
                 for item in results:
-                    url = item["url"]
-                    if "bing.com/aclick" in url:
+                    search_log.append({**item, "tier": tier})
+                    if "bing.com/aclick" in item["url"] or not item["snippet"]:
                         continue
-                    content = f"Headline: {item['title']}\nSnippet: {item['snippet']}".strip()
-                    if not item["snippet"]:
+                    content = f"Headline: {item['title']}\nSnippet: {item['snippet']}"
+                    if not dedup.accept(item["url"], content):
                         continue
-                    if url and url != "DuckDuckGo Search":
-                        seen_urls.add(url)
-                    source_documents.append(Document(
-                        page_content=content,
-                        metadata={
-                            "source": url or "DuckDuckGo Search",
-                            "title": item["title"],
-                            "published": item["published"],
-                            "tier": tier,
-                        },
-                    ))
+                    self._add_source(docs, [(None, content)], item, tier)
                     added += 1
                 print(f"Collected {added} items for {tier}.")
             except Exception as e:
                 print(f"An error occurred during web search for tier '{tier}': {e}")
 
-        # Tier 4: Deep Dive (scrape full HTML articles or PDF reports)
-        print("--- Searching for: Deep Dive (Articles & PDFs) ---")
-        deep_query = f"{entity_name} {ticker} competitive moat financial analysis"
-        try:
-            deep_results = self._search_structured("Deep Dive", deep_query, max_results=5, use_news=False)
-            scraped_count = 0
-            for item in deep_results:
-                if scraped_count >= 2:
-                    break
-                url = item["url"]
-                if not url or not url.startswith("http") or "bing.com/aclick" in url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                print(f"Scraping {url}...")
-                scraped = scrape_website.run(url)
-                if scraped and not scraped.startswith("Error"):
-                    source_documents.append(Document(
-                        page_content=scraped,
-                        metadata={
-                            "source": url,
-                            "title": item["title"],
-                            "published": item["published"],
-                            "tier": "Deep Dive",
-                        },
-                    ))
-                    scraped_count += 1
-                    print(f"Successfully scraped deep-dive content from {url}")
-                elif item["snippet"]:
-                    source_documents.append(Document(
-                        page_content=f"Headline: {item['title']}\nSnippet: {item['snippet']}",
-                        metadata={
-                            "source": url,
-                            "title": item["title"],
-                            "published": item["published"],
-                            "tier": "Deep Dive",
-                        },
-                    ))
-        except Exception as e:
-            print(f"An error occurred during Deep Dive search: {e}")
+        # Tier 4: Deep Dive (full HTML articles or PDF reports, no truncation)
+        if self.search_tool:
+            print("--- Searching for: Deep Dive (Articles & PDFs) ---")
+            deep_query = f"{entity_name} {ticker} competitive moat financial analysis"
+            try:
+                deep_results = self._search_structured("Deep Dive", deep_query, max_results=5, use_news=False)
+                scraped_count = 0
+                for item in deep_results:
+                    search_log.append({**item, "tier": "Deep Dive"})
+                    url = item["url"]
+                    if scraped_count >= 2 or not url.startswith("http") or "bing.com/aclick" in url:
+                        continue
+                    if rp.normalize_url(url) in dedup.urls:
+                        dedup.rejected += 1
+                        continue
+                    print(f"Scraping {url}...")
+                    try:
+                        fetched = fetch_document(url)
+                        full_text = "\n".join(t for _, t in fetched["pages"])
+                        if not dedup.accept(url, full_text):
+                            continue
+                        doc_no = self._add_source(docs, fetched["pages"], item, "Deep Dive")
+                        raw_files[doc_no] = self._save_raw(doc_no, fetched)
+                        scraped_count += 1
+                        print(f"Scraped {len(full_text)} characters from {url}")
+                    except Exception as e:
+                        print(f"Could not scrape {url}: {e}")
+                        snippet = f"Headline: {item['title']}\nSnippet: {item['snippet']}"
+                        if item["snippet"] and dedup.accept(url, snippet):
+                            self._add_source(docs, [(None, snippet)], item, "Deep Dive")
+            except Exception as e:
+                print(f"An error occurred during Deep Dive search: {e}")
 
-        self.cache[context_cache_key] = (financial_data, source_documents)
-        return financial_data, source_documents
+        self._index(entity_name, ticker, financial_data, docs)
+        self.run_log.update({
+            "search_items": search_log,
+            "dedup_rejected": dedup.rejected,
+            "raw_files": raw_files,
+        })
+        return self._context
 
-    def _create_rag_chain(self, system_prompt, source_documents):
-        if not source_documents:
-            def no_rag_chain(input_data):
-                prompt = ChatPromptTemplate.from_template(system_prompt).format(
-                    financial_data=input_data.get("financial_data", "N/A"),
-                    context_formatted="No web context was available for this analysis."
-                )
-                response = self.llm.invoke(prompt)
-                return {"answer": response, "sources": []}
-            return RunnableLambda(no_rag_chain)
+    def _index(self, entity_name, ticker, financial_data, docs):
+        """Chunks and embeds the sources once; all personas reuse this index."""
+        chunks = rp.build_chunks(docs, entity_name, self.tokenizer)
+        vector_store = FAISS.from_documents(chunks, self.embeddings_model) if chunks else None
+        self._context = {
+            "key": (entity_name, ticker),
+            "financial_data": financial_data,
+            "documents": docs,
+            "chunks": chunks,
+            "vector_store": vector_store,
+        }
+        self.run_log = {
+            "company": entity_name,
+            "ticker": ticker,
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "chunking": {
+                "mode": "tokens" if self.tokenizer is not None else "characters",
+                "chunk_size": rp.CHUNK_TOKENS if self.tokenizer is not None else 1000,
+                "top_k": rp.TOP_K,
+                "max_chunks_per_doc": rp.MAX_CHUNKS_PER_DOC,
+            },
+            "financial_data": financial_data,
+            "documents": [{**d.metadata, "content": d.page_content} for d in docs],
+            "n_chunks": len(chunks),
+            "retrieval": {},
+        }
 
-        split_docs = self.text_splitter.split_documents(source_documents)
-        vector_store = FAISS.from_documents(documents=split_docs or source_documents, embedding=self.embeddings_model)
-        retriever = vector_store.as_retriever(search_kwargs={"k": 6})
+    def load_snapshot(self, path):
+        """Rebuilds the context from a saved run, so an analysis can be replayed offline."""
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+        docs = [
+            Document(page_content=d["content"], metadata={k: v for k, v in d.items() if k != "content"})
+            for d in snap["documents"]
+        ]
+        self._index(snap["company"], snap["ticker"], snap["financial_data"], docs)
+        return snap
 
-        def format_docs_with_citations(docs):
-            return "\n\n".join([
-                (
-                    f"[Source {i+1}]: Title: {doc.metadata.get('title', 'N/A')}\n"
-                    f"Published: {doc.metadata.get('published', 'N/A')}\n"
-                    f"URL: {doc.metadata.get('source', 'N/A')}\n"
-                    f"Content: {doc.page_content}"
-                )
-                for i, doc in enumerate(docs)
-            ])
+    def save_run(self, outputs=None):
+        """Writes sources, retrieved chunk ids and outputs to runs/<time>_<ticker>.json."""
+        if not self.run_log:
+            return None
+        if outputs:
+            self.run_log["outputs"] = outputs
+        os.makedirs(self.runs_dir, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self.runs_dir, f"{stamp}_{self.run_log['ticker']}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.run_log, f, ensure_ascii=False, indent=2, default=str)
+        return path
 
-        rag_chain = (
-            {
-                "context_docs": itemgetter("input") | retriever,
-                "input": itemgetter("input"),
-                "financial_data": itemgetter("financial_data"),
-            }
-            | RunnablePassthrough.assign(context_formatted=lambda x: format_docs_with_citations(x["context_docs"]))
-            | { "answer": ChatPromptTemplate.from_template(system_prompt) | self.llm, "sources": itemgetter("context_docs") }
-        )
-        return rag_chain
+    # --- Retrieval + generation ---
+    def retrieve(self, query):
+        """Top-k chunks with at most MAX_CHUNKS_PER_DOC chunks from any one source."""
+        ctx = self._context
+        if not ctx or not ctx["vector_store"]:
+            return []
+        # Rank every chunk (a few hundred at most) so the per-source cap never runs dry.
+        scored = ctx["vector_store"].similarity_search_with_score(query, k=len(ctx["chunks"]))
+        return rp.select_balanced(scored)
 
     def _run_analysis(self, entity_name, ticker, system_prompt, query_input):
-        financial_data, source_documents = self._get_context(entity_name, ticker)
-        rag_chain = self._create_rag_chain(system_prompt, source_documents)
-        response = rag_chain.invoke({"input": query_input, "financial_data": financial_data})
-        if isinstance(response, dict):
-             return {"answer": _extract_text(response['answer'].content), "sources": response['sources']}
-        else:
-             return {"answer": _extract_text(response.content), "sources": []}
+        ctx = self._get_context(entity_name, ticker)
+        docs = self.retrieve(query_input)
+        context = rp.format_context(docs) if docs else "No web context was available for this analysis."
+        prompt = ChatPromptTemplate.from_template(system_prompt).format(
+            financial_data=ctx["financial_data"], context_formatted=context
+        )
+        response = self.llm.invoke(prompt)
+        self.run_log.setdefault("retrieval", {})[query_input] = [d.metadata["chunk_id"] for d in docs]
+        return {"answer": _extract_text(response.content), "sources": docs}
 
     def generate_market_outlook(self, entity_name, ticker):
         print("\nGenerating Market Investor Outlook...")
@@ -231,7 +264,7 @@ class ResearchAgent:
             "1. **Professional Market Sentiment:** Based on official news/reports.\n"
             "2. **Retail Investor Sentiment:** Based on forum snippets.\n"
             "3. **Valuation Analysis:** Is it expensive or cheap? Reference 'Trailing P/E' and 'Trailing EPS'.\n"
-            "**Cite sources with [1], [2] at the end of sentences.**\n\nContext:\n{context_formatted}\n\n"
+            "**Cite sources with the bracketed source numbers shown in the context, e.g. [3], at the end of sentences.**\n\nContext:\n{context_formatted}\n\n"
             "This is an objective summary, not financial advice. "
             "Do not insert line breaks inside words or numbers. Keep paragraphs wrapped normally."
         )
@@ -245,7 +278,7 @@ class ResearchAgent:
             "1. **Valuation Summary:** State if it's 'Overvalued', 'Undervalued', or 'Fairly Valued', justifying with data.\n"
             "2. **SWOT Analysis:** Bulleted Strengths, Weaknesses, Opportunities, Threats.\n"
             "3. **Competitive Moat:** Describe its long-term advantages.\n"
-            "**Cite sources with [1], [2] at the end of sentences.**\n\nContext:\n{context_formatted}\n\n"
+            "**Cite sources with the bracketed source numbers shown in the context, e.g. [3], at the end of sentences.**\n\nContext:\n{context_formatted}\n\n"
             "Do not insert line breaks inside words or numbers. Keep paragraphs wrapped normally."
         )
         return self._run_analysis(entity_name, ticker, system_prompt, f"Value analysis for {entity_name}")
@@ -255,7 +288,7 @@ class ResearchAgent:
         system_prompt = (
             "You are a skeptical 'Devil's Advocate' analyst. Your purpose is to challenge the bullish thesis. Key financial data:\n{financial_data}\n\n" 
             "Using the retrieved context below, identify the single strongest counter-argument or hidden risk in a concise paragraph.\n"
-            "**Cite the source of your information with [1], [2] at the end of the sentence.**\n\nContext:\n{context_formatted}\n\n"
+            "**Cite the source of your information with the bracketed source numbers shown in the context, e.g. [3], at the end of the sentence.**\n\nContext:\n{context_formatted}\n\n"
             "Do not insert line breaks inside words or numbers. Keep paragraphs wrapped normally."
         )
         return self._run_analysis(entity_name, ticker, system_prompt, f"Strongest bearish case against {entity_name}?")

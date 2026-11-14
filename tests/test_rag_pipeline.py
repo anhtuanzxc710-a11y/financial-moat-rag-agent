@@ -155,3 +155,36 @@ def test_text_search_falls_back_to_news():
     agent = research_agent.ResearchAgent(None, DeterministicFakeEmbedding(size=8), Blocked())
     items = agent._search_structured("Critical", "Apple risks", max_results=4)
     assert items and all(i["via"] == "news" for i in items)
+
+
+def test_html_noise_filter_keeps_article_header_drops_chrome():
+    html = b"""<html><head><meta name="description" content="We think the stock is fairly valued."></head><body>
+    <header><a href="/">Home</a> Site menu</header>
+    <ul><li><a href="/q/AMZN">AMZN -1.16%</a></li><li><a href="/q/MSFT">MSFT -0.18%</a></li></ul>
+    <main><article><header><h1>Tesla launch</h1><p>Deck: shares trade 20% below fair value.</p></header>
+    <p>""" + b"Body text about margins and demand. " * 20 + b"""</p>
+    <ul><li>Gross margin 17.9%</li><li><a href="/x">Related: another story</a></li></ul></article></main>
+    <footer>Copyright 2026 Example Inc.</footer></body></html>"""
+    text = rp.extract_html_text(html)
+    assert text.startswith("Summary: We think the stock is fairly valued.")
+    assert "Deck: shares trade 20% below fair value." in text and "Tesla launch" in text
+    assert "Gross margin 17.9%" in text
+    for noise in ["AMZN -1.16%", "Related: another story", "Copyright", "Site menu"]:
+        assert noise not in text
+
+
+def test_colab_agent_uses_shared_pipeline(monkeypatch):
+    import research_agent_colab as rac
+
+    class FakeWrapper:
+        def __init__(self, **kw):
+            pass
+
+        def results(self, query, num_results=4):
+            return [{"title": "T", "link": "https://a.com/x", "snippet": "S"}, {"Result": "No good result"}]
+
+    monkeypatch.setattr(rac, "GoogleSearchAPIWrapper", FakeWrapper)
+    agent = rac.ResearchAgent(None, DeterministicFakeEmbedding(size=8))
+    items = agent._search_structured("Official", "Apple news", use_news=True)
+    assert len(items) == 1 and items[0]["url"] == "https://a.com/x"
+    assert isinstance(agent, research_agent.ResearchAgent)

@@ -21,6 +21,7 @@ except ImportError:  # LangChain 0.x
 # before splitting. These ceilings only bound download/parse cost.
 MAX_HTML_CHARS = 60_000
 MAX_PDF_PAGES = 40
+MIN_MAIN_CHARS = 500  # an <article>/<main> shorter than this is a teaser, not the body
 
 # MiniLM truncates input at 256 word pieces. Content chunks are kept at 200 tokens
 # so the context header (company, tier, title) still fits under the limit.
@@ -34,7 +35,7 @@ TOP_K = 6
 MAX_CHUNKS_PER_DOC = 2
 
 _BLOCK_TAGS = ["h1", "h2", "h3", "h4", "p", "li", "table"]
-_NOISE_TAGS = ["script", "style", "noscript", "nav", "header", "footer", "aside", "form"]
+_NOISE_TAGS = ["script", "style", "noscript", "nav", "aside", "form"]
 
 
 # --- Extraction (L2, L4) ----------------------------------------------------
@@ -54,24 +55,47 @@ def _table_to_text(table) -> str:
     return "\n".join(rows)
 
 
+def _is_link_list_item(el, text) -> bool:
+    """Headings/list items that are only a link: menus, tickers, 'related articles'."""
+    link_text = " ".join(a.get_text(" ", strip=True) for a in el.find_all("a"))
+    return bool(link_text) and len(link_text) >= 0.8 * len(text)
+
+
+def _main_content(soup):
+    """The page's <article>/<main> when it holds the body text, else the whole page."""
+    for root in (soup.find("article"), soup.find("main"), soup.find(attrs={"role": "main"})):
+        if root is not None and len(root.get_text(" ", strip=True)) >= MIN_MAIN_CHARS:
+            return root
+    return soup
+
+
 def extract_html_text(html) -> str:
-    """Headings, paragraphs, list items and tables in document order.
+    """Headings, paragraphs, list items and tables of the main content, in document order.
 
     Tables are flattened row by row ("cell ; cell ; cell") so financial figures
-    that live in tables survive extraction.
+    that live in tables survive extraction. Link-only headings and list items
+    (menus, ticker strips, related-article lists) are skipped as noise.
     """
     soup = BeautifulSoup(html, "html.parser")
+    meta = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
     for tag in soup(_NOISE_TAGS):
         tag.decompose()
+    for tag in soup(["header", "footer"]):
+        if not tag.find_parent(["article", "main"]):  # site chrome; an article's own header keeps its deck
+            tag.decompose()
     blocks = []
-    for el in soup.find_all(_BLOCK_TAGS):
+    summary = (meta.get("content") or "").strip() if meta else ""
+    if summary:
+        blocks.append(f"Summary: {summary}")
+    for el in _main_content(soup).find_all(_BLOCK_TAGS):
         if el.name != "table" and el.find_parent("table"):
             continue  # already covered by the table itself
         if el.name == "li" and el.find("p"):
             continue  # its <p> children are emitted on their own
         text = _table_to_text(el) if el.name == "table" else el.get_text(" ", strip=True)
-        if text:
-            blocks.append(text)
+        if not text or (el.name != "table" and el.name != "p" and _is_link_list_item(el, text)):
+            continue
+        blocks.append(text)
     return "\n\n".join(blocks)[:MAX_HTML_CHARS]
 
 

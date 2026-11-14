@@ -24,21 +24,25 @@ def display_analysis(title, company_name, result, is_summary=False):
     </div>
     """))
     
-    # Display the numbered list of sources
+    # Display sources once each, with the global [n] number used in the text
     if sources:
-        sources_html = "<div style='margin-top: 10px;'><strong>Sources Used in this Section:</strong><ol style='margin-left: 20px; padding-left: 10px; color: #ccc;'>"
-        for i, source_doc in enumerate(sources):
+        sources_html = "<div style='margin-top: 10px;'><strong>Sources Used in this Section:</strong><ul style='list-style: none; padding-left: 10px; color: #ccc;'>"
+        shown = set()
+        for source_doc in sources:
             source = source_doc.metadata
+            doc_no = source.get('doc_no')
+            if doc_no in shown:
+                continue
+            shown.add(doc_no)
             title_text = str(source.get('title', 'Untitled Source'))
             published_date_str = str(source.get('published', 'N/A'))
-            
-            # Only show the date part if it's available
             display_date = f"({published_date_str.split(',')[0]})" if 'N/A' not in published_date_str else ""
-            
+            chunk_ids = ", ".join(d.metadata.get('chunk_id', '') for d in sources if d.metadata.get('doc_no') == doc_no)
             sources_html += f"""
-            <li style='margin-bottom: 5px;'>
+            <li style='margin-bottom: 5px;'>[{doc_no}]
                 <a href='{source.get('source', '#')}' target='_blank' style='color: #8ab4f8;'>{HTML(title_text).data}</a> {display_date}
+                <span style='color: #888; font-size: 0.85em;'>chunks: {chunk_ids}</span>
             </li>
             """
-        sources_html += "</ol></div>"
+        sources_html += "</ul></div>"
         display(HTML(sources_html))

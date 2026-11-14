@@ -1,0 +1,4 @@
+-r requirements.txt
+# tests and before/after experiments
+pytest>=8,<10
+matplotlib>=3.8,<4

@@ -210,6 +210,28 @@ def measure(snap_path, emb, tok):
         seen_u.add(u); seen_h.add(h)
     m["duplicates"] = {"old_indexed": int(dup), "new_rejected": snap.get("dedup_rejected", 0)}
 
+    # L13: LangChain's own add_start_index with token-based splitting
+    lc = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        tok, chunk_size=rp.CHUNK_TOKENS, chunk_overlap=rp.CHUNK_OVERLAP_TOKENS, add_start_index=True
+    ).split_documents(new)
+    m["langchain_start_index"] = {"chunks": len(lc), "minus_one": sum(c.metadata["start_index"] == -1 for c in lc),
+                                  "ours_minus_one": sum(c.metadata["start_index"] == -1 for c in new_chunks)}
+
+    # Concrete examples for the report (real text, shortened)
+    deep = [c for c in new_chunks if c.metadata["tier"] == "Deep Dive" and c.metadata["chunk_id"].endswith("c3")]
+    q = queries(company)[1]
+    old_top = old_vs.similarity_search(q, k=6)
+    new_top = rp.select_balanced(new_vs.similarity_search_with_score(q, k=len(new_chunks)))
+    m["examples"] = {
+        "chunk": {"chunk_id": deep[0].metadata["chunk_id"], "start_index": deep[0].metadata["start_index"],
+                  "text": deep[0].page_content[:420]} if deep else None,
+        "query": q,
+        "old_context": "\n\n".join(f"[Source {i + 1}]: Title: {d.metadata['title']}\nContent: {d.page_content[:160]}"
+                                     for i, d in enumerate(old_top[:2])),
+        "new_context": rp.format_context(new_top[:2])[:700],
+        "new_picks": [d.metadata["chunk_id"] for d in new_top],
+    }
+
     figures(m, snap, old_chunks, new_chunks, old_tok, new_tok, emb, company)
     return m
 

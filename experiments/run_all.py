@@ -182,6 +182,7 @@ def measure(snap_path, emb, tok):
         old_top = old_vs.similarity_search(q, k=6)
         scored = new_vs.similarity_search_with_score(q, k=len(new_chunks))
         new_top = rp.select_balanced(scored)
+        uncapped = [d.metadata["doc_no"] for d, _ in scored[:rp.TOP_K]]  # same chunks, no per-source cap
         for i, d in enumerate(old_top):
             old_numbers.setdefault(d.metadata["key"], set()).add(i + 1)
         oc = [d.metadata["key"] for d in old_top]
@@ -190,6 +191,8 @@ def measure(snap_path, emb, tok):
             "query": q,
             "old": {"distinct_sources": len(set(oc)), "max_from_one_source": max(oc.count(x) for x in oc)},
             "new": {"distinct_sources": len(set(nc)), "max_from_one_source": max(nc.count(x) for x in nc)},
+            "new_without_cap": {"distinct_sources": len(set(uncapped)),
+                                "max_from_one_source": max(uncapped.count(x) for x in uncapped)},
         })
     multi = [v for v in old_numbers.values()]
     m["citation_numbers"] = {
@@ -281,14 +284,15 @@ def summary_figure(all_m):
     labels = [m["ticker"] for m in all_m]
     x = np.arange(len(labels))
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.4))
-    old = [np.mean([r["old"]["distinct_sources"] for r in m["retrieval"]]) for m in all_m]
-    new = [np.mean([r["new"]["distinct_sources"] for r in m["retrieval"]]) for m in all_m]
-    axes[0].bar(x - .2, old, .4, label="Bản nhóm"); axes[0].bar(x + .2, new, .4, label="Cải tiến")
-    axes[0].set_xticks(x, labels); axes[0].set_ylim(0, 6.5); axes[0].set_title("Số nguồn khác nhau trong top-6 (TB 3 truy vấn)")
-    axes[0].legend(fontsize=8)
+    w = .27
+    for i, (key, name) in enumerate([("old", "Bản nhóm"), ("new_without_cap", "Toàn văn, chưa giới hạn"), ("new", "Cải tiến (≤ 2 đoạn/nguồn)")]):
+        vals = [max(r[key]["max_from_one_source"] for r in m["retrieval"]) for m in all_m]
+        axes[0].bar(x + (i - 1) * w, vals, w, label=name)
+    axes[0].set_xticks(x, labels); axes[0].set_title("Số đoạn nhiều nhất từ 1 nguồn trong top-6"); axes[0].legend(fontsize=7)
     old_p = [100 * sum(s["chars_old_kept"] for s in m["scraped"]) / max(1, sum(s["chars_new"] for s in m["scraped"])) for m in all_m]
     axes[1].bar(x - .2, old_p, .4, label="Bản nhóm"); axes[1].bar(x + .2, [100] * len(x), .4, label="Cải tiến")
     axes[1].set_xticks(x, labels); axes[1].set_ylim(0, 110); axes[1].set_title("% văn bản tài liệu cào được giữ lại")
+    axes[1].legend(fontsize=7)
     fig.tight_layout(); fig.savefig(f"{OUT}/summary.png", dpi=200); plt.close(fig)
 
 
